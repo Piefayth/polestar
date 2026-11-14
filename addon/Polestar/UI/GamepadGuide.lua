@@ -2,9 +2,11 @@
 --
 -- The gamepad on the guide window and in the options (docs/ARCHITECTURE.md,
 -- "Gamepad"):
--- * Focus mode ("Browse the guide with the gamepad", POLESTAR_FOCUS): the
---   guide window never takes a button from the game while it is merely
---   shown; this binding gives it the gamepad until B. The D-pad picks a line
+-- * The focus binding ("Browse the guide with the gamepad", POLESTAR_FOCUS):
+--   with the gamepad interface, the guide window joins the game's own focus
+--   (below); with the keyboard and mouse interface, focus mode: the guide
+--   window never takes a button from the game while it is merely shown;
+--   this binding gives it the gamepad until B. The D-pad picks a line
 --   (up from the goals: the navigator's buttons and the tabs), A points the
 --   arrow there or uses the quest item on its line, X shows the line's
 --   details, LB / RB look at the previous / next step, Y minimizes the window
@@ -41,10 +43,8 @@ end
 
 -- A goal line the quest item button serves: A uses the item there (the
 -- button's secure click, through an override binding: never from
--- Polestar's code). Not with the gamepad interface, which keeps its
--- buttons' bindings (G.Redirect): A clicks that line as on any other.
+-- Polestar's code).
 local function itemRow(w)
-	if ns.GamepadUI() then return false end
 	local goal = w and w.psGoal
 	local b = itemButton()
 	if not (goal and b and b:IsShown() and b.itemID) then return false end
@@ -147,13 +147,97 @@ function G.StopFocus()
 	G.Close(F)
 end
 
+---------------------------------------------------------------------------
+-- The game's own focus (the gamepad interface)
+---------------------------------------------------------------------------
+-- With Forever's gamepad interface on, the guide window is one of the windows
+-- the game's focus button cycles through, as its buff frame is: the focus
+-- binding enters it as a UI panel of no area (ShowUIPanel only shows such a
+-- panel, and the game's manager hears of it), the game's cursor moves over
+-- its buttons, A clicks and B leaves it with the window still shown (the
+-- manager's FrameHidden, as the buff frame's close handler does). The manager
+-- hears whenever the window hides. Its calls are refused in a fight, so a
+-- fight takes the window out of the cycle as it begins (Combat, Activating:
+-- the manager still takes the call then) and gives the focus back when it
+-- ends if the window had it.
+
+local refocus = false
+
+local function manager()
+	local m = GamepadMode and GamepadMode.FrameControlsManager
+	if m and ns.GamepadUI() then return m end
+end
+
+local function inCycle(m)
+	for _, f in ipairs(m.shownFrames or {}) do
+		if f == F then return true end
+	end
+	return false
+end
+
+local function leaveNative()
+	local m = manager()
+	if m and F and not combat() and inCycle(m) then m:FrameHidden(F) end
+end
+
+-- -> the guide window, made a panel the first time.
+local function nativeFrame()
+	F = F or rawget(_G, "PolestarGuideFrame")
+	if not F or F.psNative then return F end
+	F.psNative = true
+	if UIPanelWindows then UIPanelWindows["PolestarGuideFrame"] = {} end
+	F.SmartNavigationCloseHandler = function()
+		leaveNative()
+		return true
+	end
+	F:HookScript("OnHide", leaveNative)
+	return F
+end
+
+local function enterNative()
+	if combat() or not nativeFrame() then return end
+	if not F:IsShown() then ns.Set("ui.shown", true) end
+	if ns.Get("ui.compact") then ns.Set("ui.compact", false) end
+	if not F:IsShown() then return end
+	leaveNative()
+	F:Hide()
+	ShowUIPanel(F)
+end
+
+local function toggleNative()
+	local m = manager()
+	if m and m.isUIFocused and m.focusedFrame == F and F and F:IsShown() then
+		leaveNative()
+	else
+		enterNative()
+	end
+end
+
+if Enum and Enum.AddOnRestrictionType and Enum.AddOnRestrictionState then
+	local fight = CreateFrame("Frame")
+	if pcall(fight.RegisterEvent, fight, "ADDON_RESTRICTION_STATE_CHANGED") then
+		fight:SetScript("OnEvent", function(_, _, kind, state)
+			if kind ~= Enum.AddOnRestrictionType.Combat or state ~= Enum.AddOnRestrictionState.Activating then return end
+			local m = manager()
+			if not (m and F and inCycle(m)) then return end
+			refocus = m.isUIFocused and m.focusedFrame == F
+			pcall(m.FrameHidden, m, F)
+		end)
+	end
+end
+ns.RegisterEvent("PLAYER_REGEN_ENABLED", function()
+	if not refocus then return end
+	refocus = false
+	if F and F:IsShown() then enterNative() end
+end)
+
 -- The focus binding: a window that showed on its own and waits takes the
--- gamepad first; else focus mode starts or ends.
+-- gamepad first; else the guide window takes the focus or gives it back.
 function G.ToggleFocus()
 	if focusing then
 		G.StopFocus()
 	elseif not G.TakeWaiting() then
-		G.StartFocus()
+		if ns.GamepadUI() then toggleNative() else G.StartFocus() end
 	end
 end
 
