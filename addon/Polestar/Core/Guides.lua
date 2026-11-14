@@ -127,13 +127,17 @@ local function directTravelCost(from, to)
 end
 ns.DirectTravelCost = directTravelCost
 
-function ns.TravelCost(from, to)
+-- Seconds from `from` to `to` ({ map, x, y, f }), by the travel planner when
+-- Nav is loaded, else straight. from = nil: the player, whose own way counts
+-- the Hearthstone and teleports (noHearth: without the Hearthstone).
+function ns.TravelCost(from, to, noHearth)
 	local nav = ns.Nav
 	if nav and nav.EstimateTravel then
-		local ok, s = pcall(nav.EstimateTravel, from, to)
+		local ok, s = pcall(nav.EstimateTravel, from, to, nil, noHearth)
 		if ok and type(s) == "number" then return s end
 	end
-	return directTravelCost(from, to)
+	from = from or ns.PlayerPoint()
+	return from and directTravelCost(from, to) or nil
 end
 
 -- The player's live position as a travel point, or nil (instance, loading).
@@ -1501,7 +1505,7 @@ local function rank(packId, player, here, zone)
 				local band = math.huge
 				local start = here and guideStart(g)
 				if start then
-					local cost = ns.TravelCost(here, start)
+					local cost = ns.TravelCost(nil, start)
 					if cost then band = math.floor(cost / TRAVEL_TIE) end
 				end
 				fitting[#fitting + 1] = { id = g.id, key = { inZone, band, specific, hi - lo, lo, i } }

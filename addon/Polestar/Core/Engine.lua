@@ -2015,19 +2015,15 @@ local picks = setmetatable({}, { __mode = "k" }) -- goal -> { list = { candidate
 -- planner's estimate (a set can hold one vendor per town in the world); the
 -- rest count their straight-line running time. An unplaceable candidate counts
 -- as right here when it is on the player's own map, else after every placed one.
--- A `train class` goal carries its step's zone (`zone`, a uiMapID): when that
--- map has a trainer of the character's class, the others come after all of
--- the zone's, wherever the player stands, unless one is within HOME_NEAR
--- yards of them (the trainers at the Skyborne camp below Thunder Bluff for a
--- step in Thunder Bluff). Before, the step's town lost to the trainer nearest
--- the player whenever the step came up away from it: a Shaman still in the
--- Barrens at Orgrimmar's training step was sent to the Valley of Trials
--- (#1357), and the Undercity's training step, current at Orgrimmar's
--- zeppelin tower, named Orgrimmar's trainers.
+-- A `train class` goal then takes the trainer that costs the least detour on
+-- the guide's next steps (Own.trainerOnRoute), the player's Hearthstone and
+-- teleports counted: a Shaman in the Barrens at Orgrimmar's training step
+-- trains in Orgrimmar, on the way on, not in the Valley of Trials nearest him
+-- (#1357), and a Druid trains in Moonglade when Teleport: Moonglade and the
+-- Hearthstone back make that the shorter trip.
 Own.UNMEASURED = 1e9
 Own.PLANNED = 8
 local RUN_SPEED = 7 -- yards per second, unmounted
-Own.HOME_NEAR = 100
 -- Farm spots (`collect … nearest`): seconds to farm the items still missing
 -- there, and how many levels the spot's weakest mobs are above the player
 -- (3 or more: too high).
@@ -2097,23 +2093,6 @@ local function pickFor(goal)
 			cost[c] = line or ((here and c.map == here.map) and 0 or Own.UNMEASURED)
 		end
 	end
-	-- `train class`: the step's zone first, unless a trainer stands by the
-	-- player (cost: straight-line seconds here, before the planner's).
-	local home = goal.zone
-	if home then
-		local has = false
-		for _, c in ipairs(list) do
-			if c.map == home then
-				has = true
-				break
-			end
-		end
-		if has then
-			for _, c in ipairs(list) do
-				if c.map ~= home and cost[c] * RUN_SPEED > Own.HOME_NEAR then tier[c] = tier[c] + 4 end
-			end
-		end
-	end
 	-- Farm spots whose mobs are too high go, unless nothing else is left:
 	-- then the smallest level gap first.
 	if farm and reasonable then
@@ -2132,10 +2111,20 @@ local function pickFor(goal)
 	if here then
 		for k = 1, math.min(Own.PLANNED, #list) do
 			local c = list[k]
-			local s = ns.TravelCost(here, c)
+			local s = ns.TravelCost(nil, c)
 			if s then cost[c] = s end
 		end
 		table.sort(list, better)
+	end
+	if goal.t == "train" and goal.class then
+		local t = Own.trainerOnRoute(list, tier)
+		for k, c in ipairs(list) do
+			if c == t then
+				table.remove(list, k)
+				table.insert(list, 1, t)
+				break
+			end
+		end
 	end
 	p = { list = list, i = #list > 0 and 1 or 0, gen = contextGen, tier = tier }
 	picks[goal] = p
@@ -7095,7 +7084,7 @@ local function rankRoutes(options)
 	local best, k1, k2
 	for _, o in ipairs(options) do
 		local start = here and Guides.Start(o.guide)
-		o.seconds = start and ns.TravelCost(here, start) or nil
+		o.seconds = start and ns.TravelCost(nil, start) or nil
 		local a = o.outleveled and 1 or 0
 		local b = o.seconds and math.floor(o.seconds / ROUTE_TIE) or math.huge
 		if not best or a < k1 or (a == k1 and b < k2) then best, k1, k2 = o, a, b end
@@ -7283,40 +7272,56 @@ end
 
 -- The trainer of the best pickFor tier (continent, zone level) among `list`
 -- (nearest first) that costs the least detour on the guide's next steps; a
--- trainer within ROUTE_TIE of a nearer one loses to it. Straight lines pick
--- the Own.ROUTE_PLANNED likeliest, then the route planner prices each one's
--- best leg, so a trainer on the far side of a mountain does not win by
--- being close as the crow flies. Nil when the guide has no route ahead of
--- the player to measure against.
-Own.ROUTE_PLANNED = 4
+-- trainer within ROUTE_TIE of a nearer one loses to it. Every trainer is
+-- priced by the route planner, on the leg straight lines find cheapest to
+-- leave and rejoin the route at and on the first leg, from the player, the
+-- only place the Hearthstone and teleports leave from: a trainer a flight or
+-- a teleport brings near is near, one on the far side of a mountain is not.
+-- A Hearthstone not spent on the way there can take the player back, when it
+-- saves as much as the planner asks of it (Nav.HEARTH_MARGIN). Nil when the
+-- guide has no route ahead of the player to measure against.
 function Own.trainerOnRoute(list, tier)
 	local here = ns.PlayerPoint()
 	local pts = here and Own.routePoints()
 	if not pts or #pts == 0 then return nil end
-	local rough = {}
-	for order, c in ipairs(list) do
+	local Nav = ns.Nav
+	local inn = Nav and Nav.HearthInn and Nav.HearthInn()
+	local hearthed = {} -- [i] = seconds to pts[i] by the Hearthstone, or false
+	local function on(t, i)
+		local tb = ns.TravelCost(t, pts[i])
+		if not inn then return tb end
+		if hearthed[i] == nil then
+			local s = ns.TravelCost(inn, pts[i])
+			hearthed[i] = s and s + Nav.HEARTH_SECONDS or false
+		end
+		local h = hearthed[i]
+		if h and (not tb or h + Nav.HEARTH_MARGIN <= tb) then return h end
+		return tb
+	end
+	local function detour(t, i)
+		local a = i > 1 and pts[i - 1] or nil
+		local ab, at, tb = ns.TravelCost(a, pts[i]), ns.TravelCost(a, t), ns.TravelCost(t, pts[i])
+		local via = at and tb and at + tb
+		if i == 1 and inn then
+			local kept, back = ns.TravelCost(nil, t, true), on(t, 1)
+			if kept and back and (not via or kept + back < via) then via = kept + back end
+		end
+		return ab and via and via - ab
+	end
+	local best, bestCost
+	for _, c in ipairs(list) do
 		if tier[c] == tier[list[1]] then
 			local d, leg = Own.routeDetour(here, pts, c, ns.DirectTravelCost)
-			if d then rough[#rough + 1] = { c = c, d = d, leg = leg, order = order } end
+			if d then
+				local cost = detour(c, 1)
+				if leg > 1 then
+					local other = detour(c, leg)
+					if other and (not cost or other < cost) then cost = other end
+				end
+				cost = cost or d
+				if not best or cost < bestCost - Own.ROUTE_TIE then best, bestCost = c, cost end
+			end
 		end
-	end
-	table.sort(rough, function(x, y)
-		if x.d ~= y.d then return x.d < y.d end
-		return x.order < y.order
-	end)
-	local best, bestCost
-	for k = 1, math.min(Own.ROUTE_PLANNED, #rough) do
-		local r = rough[k]
-		local from = r.leg == 1 and here or pts[r.leg - 1]
-		local to = pts[r.leg]
-		local ab, at, tb = ns.TravelCost(from, to), ns.TravelCost(from, r.c), ns.TravelCost(r.c, to)
-		r.cost = ab and at and tb and at + tb - ab or r.d
-	end
-	local planned = {}
-	for k = 1, math.min(Own.ROUTE_PLANNED, #rough) do planned[#planned + 1] = rough[k] end
-	table.sort(planned, function(x, y) return x.order < y.order end)
-	for _, r in ipairs(planned) do
-		if not best or r.cost < bestCost - Own.ROUTE_TIE then best, bestCost = r.c, r.cost end
 	end
 	return best
 end

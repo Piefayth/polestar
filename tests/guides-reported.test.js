@@ -112,6 +112,21 @@ function allGuides() {
 	return walk(path.join(OFFICIAL_DIR, 'forever')).map((file) => path.relative(OFFICIAL_DIR, file).split(path.sep).join('/'));
 }
 
+// Every `train class` line of a guide's source with the zone it stands in (the
+// last `zone` line above it, a step's or the header's) and the step's title.
+function trainZones(guide) {
+	const out = [];
+	let zone = null;
+	let title = null;
+	for (const line of fs.readFileSync(path.join(OFFICIAL_DIR, guide), 'utf8').split(/\r?\n/)) {
+		const z = line.match(/^\s*zone\s+(.+?)\s*(--.*)?$/);
+		const st = line.match(/^step\s+(.+?)\s*$/);
+		if (st) title = st[1];
+		else if (z) zone = z[1];
+		else if (/^\s+train class\b/.test(line)) out.push({ title, zone });
+	}
+	return out;
+}
 // Index of the first goal matching, asserted present.
 function at(list, what, pred) {
 	const i = list.findIndex(({ goal }) => pred(goal));
@@ -441,8 +456,9 @@ test('forever/horde/03-silverpine-forest.guide: Orcs take the Argent quests in T
 // Horde 1-30 audit (#1414): Undead Paladins at 15 and 22 were sent from Orgrimmar to Thunder Bluff's paladin trainer.
 test('Horde 1-30: no Paladin training step waits in Orgrimmar, which has no paladin trainer (#1414)', { skip }, () => {
 	for (const guide of ['forever/horde/03-silverpine-forest.guide', 'forever/horde/05-stonetalon-mountains.guide']) {
-		const bad = goals(guide).filter(forClass('PALADIN')).filter(({ goal }) => goal.t === 'train' && goal.class && goal.zone === 1454);
-		assert.deepEqual(bad.map(({ s }) => s), [], `${guide}: no Paladin train goal on the Orgrimmar map`);
+		const titles = new Set(goals(guide).filter(forClass('PALADIN')).filter(({ goal }) => goal.t === 'train' && goal.class).map(({ step }) => step.title));
+		const bad = trainZones(guide).filter((t) => titles.has(t.title) && /^Orgrimmar/.test(t.zone || ''));
+		assert.deepEqual(bad.map((t) => t.title), [], `${guide}: no Paladin training step in Orgrimmar`);
 	}
 });
 
@@ -8971,21 +8987,21 @@ test("Emil's report (#1370): Gerenzo's Orders is asked as a group quest; Windshe
 // #1357 (MrBackus, Skyborne Shaman 30): Hillsbrad & Arathi's Orgrimmar training step came up while he
 // stood in the Barrens by Ratchet, and the Engine took the Shaman trainer nearest him, Shikrik in the
 // Valley of Trials. The Undercity training step of the Arathi guide comes up at Orgrimmar's zeppelin tower
-// the same way. A `train class` goal carries its step's zone, whose trainers the Engine ranks first
-// wherever the player stands: each of these steps names its town, and the town has a trainer of every
-// class the step trains.
-test('#1357: a training step carries its town, and the town has a trainer of each class it trains', { skip }, () => {
+// the same way. A `train class` goal takes the trainer of least detour on the guide's next steps
+// (tests/train-on-route.test.js), so each of these steps stands in its town, and the town has a trainer of
+// every class the step trains.
+test('#1357: a training step stands in its town, and the town has a trainer of each class it trains', { skip }, () => {
 	const cases = [
-		['forever/horde/30-40/01-hillsbrad-foothills.guide', /^Train$/, 1454],
-		['forever/horde/30-40/05-arathi-highlands.guide', /^(Undercity|\{zone:1458\}) trainers$/, 1458],
-		['forever/alliance/02-westfall.guide', /^Shaman training$/, 1455],
-		['forever/alliance/50-60/01-burning-steppes.guide', /^Darnassus$/, 1457],
+		['forever/horde/30-40/01-hillsbrad-foothills.guide', /^Train$/, 1454, /^Orgrimmar/],
+		['forever/horde/30-40/05-arathi-highlands.guide', /^(Undercity|\{zone:1458\}) trainers$/, 1458, /^Undercity/],
+		['forever/alliance/02-westfall.guide', /^Shaman training$/, 1455, /^Ironforge/],
+		['forever/alliance/50-60/01-burning-steppes.guide', /^Darnassus$/, 1457, /^Darnassus/],
 	];
-	for (const [guide, title, town] of cases) {
+	for (const [guide, title, town, zoneName] of cases) {
 		const list = goals(guide).filter(({ step, goal }) => title.test(step.title) && goal.t === 'train' && goal.class);
 		assert.ok(list.length > 0, `${guide}: the "${title}" step trains`);
+		for (const t of trainZones(guide).filter((t) => title.test(t.title || ''))) assert.match(t.zone || '', zoneName, `${guide}, "${t.title}": the step's town`);
 		for (const { step, goal } of list) {
-			assert.equal(goal.zone, town, `${guide}, "${title}": the step's town`);
 			const classes = (goal.only && goal.only.classes) || (step.only && step.only.classes) || [];
 			for (const cls of classes) {
 				const side = guide.includes('/horde/') ? 'H' : 'A';

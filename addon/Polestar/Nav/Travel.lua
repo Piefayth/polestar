@@ -1945,6 +1945,16 @@ local function pointWorld(p)
 	return C.MapToWorld(p.map, p.x, p.y, p.f)
 end
 
+-- The inn the player's Hearthstone takes them to now ({ c, wx, wy, map, ... }), or nil: none in the bags, on
+-- cooldown, bound where no inn is known, a ghost, or a quest timer running (the player's own estimates leave
+-- the Hearthstone out then too). For the Engine's training detour, which may keep it for the way back.
+function Nav.HearthInn()
+	local timed
+	if timedCheck then timed = readTimed() else timed = questTimed end
+	if timed or isGhost() or not hearthReady() then return nil end
+	return (bindInn())
+end
+
 -- from, to = { map, x, y, f } (from = nil: the player); budgeted = true: the public API's call;
 -- noHearth = true: the way without the Hearthstone (the Engine's hearth goal weighs the two).
 -- While a quest timer runs, the player's own estimates leave out the Hearthstone and teleports, as the route does.
