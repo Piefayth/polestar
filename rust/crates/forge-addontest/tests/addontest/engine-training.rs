@@ -498,3 +498,58 @@ fn with_no_guide_stop_within_10_steps_the_advice_is_the_planner_s_trainer_the_re
 	assert_eq!(none["steps"], false, "{none}");
 	assert_eq!(none["trainer"], none["planner"], "{none}");
 }
+
+// A Druid about to hearth with class training due: Teleport: Moonglade (faked: 10 s from the player to
+// (10, 10)) and the Hearthstone back cost seconds before the hearth, and a long haul at any later leg,
+// so the arrow goes now. With no Hearthstone to spend, now is no cheaper than later: no trip.
+fn train_now(stone: bool) -> Value {
+	emitted(&RunAddon {
+		stubs: vec!["stub_world.lua"],
+		before: r#"local w = stub.world
+w.addMap(1429, { name = "Elwynn Forest", c = 0, left = 1500, right = -1500, top = 500, bottom = -1500 })
+w.race, w.raceName, w.faction, w.class, w.className, w.level = "Tauren", "Tauren", "Horde", "DRUID", "Druid", 24
+w.moveTo(1429, 90, 10)"#
+			.into(),
+		addons: vec![Addon::files("Polestar", &["Core/Core.xml"])],
+		saved: [("Polestar".to_string(), "PolestarCharDB = { schema = 1, guide = \"test/hearth\" }".to_string())].into_iter().collect(),
+		script: [
+			TEST_PACK,
+			TEST_SOURCE,
+			r#"Polestar.RegisterGuide({ id = "test/hearth", pack = "test", title = "Hearth", minLevel = 1, maxLevel = 60, steps = {
+	{ title = "Home", goals = { { t = "goto", map = 1429, x = 50, y = 90 } } },
+	{ title = "On", goals = { { t = "goto", map = 1429, x = 20, y = 90 } } },
+} })
+Polestar.RegisterClassTrainers({
+	{ npc = 91, npcName = "Near", map = 1429, x = 85, y = 60, faction = "AH", classes = { "DRUID" } },
+	{ npc = 95, npcName = "Moonglade", map = 1429, x = 10, y = 10, faction = "AH", classes = { "DRUID" } },
+})
+local function at(p) return { map = 1429, x = p.x, y = p.y } end
+local function run(a, b) return Polestar.DirectTravelCost(a, b) end
+local teleport, inn = { x = 10, y = 10 }, STONE and { x = 50, y = 88 } or nil
+Polestar.Nav = { HEARTH_SECONDS = 15, HEARTH_MARGIN = 120 }
+local Nav = Polestar.Nav
+Nav.HearthInn = function() return inn and at(inn) or nil end
+Nav.EstimateTravel = function(from, to, _, noHearth)
+	local s = run(from or Polestar.PlayerPoint(), to)
+	if from == nil then s = math.min(s, 10 + run(at(teleport), to)) end
+	if from == nil and inn and not noHearth then
+		local h = Nav.HEARTH_SECONDS + run(at(inn), to)
+		if h + Nav.HEARTH_MARGIN <= s then s = h end
+	end
+	return s
+end"#,
+			"stub.login(); stub.advance(0.5)",
+			"local t = Polestar.Engine.TrainNow(); emit({ npc = t and t.npc or false })",
+		]
+		.join("\n")
+		.replace("STONE", if stone { "true" } else { "false" }),
+		..Default::default()
+	})
+	.remove(0)
+}
+
+#[test]
+fn a_druid_about_to_hearth_is_sent_to_moonglade_first_and_not_without_a_hearthstone_to_spend() {
+	assert_eq!(train_now(true), json!({ "npc": 95 }));
+	assert_eq!(train_now(false), json!({ "npc": false }));
+}

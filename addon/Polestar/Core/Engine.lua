@@ -7278,9 +7278,11 @@ end
 -- only place the Hearthstone and teleports leave from: a trainer a flight or
 -- a teleport brings near is near, one on the far side of a mountain is not.
 -- A Hearthstone not spent on the way there can take the player back, when it
--- saves as much as the planner asks of it (Nav.HEARTH_MARGIN). Nil when the
--- guide has no route ahead of the player to measure against.
-function Own.trainerOnRoute(list, tier)
+-- saves as much as the planner asks of it (Nav.HEARTH_MARGIN). Also the
+-- leg it goes on (1: before the live step's work) and its detour, and with
+-- `later` the cheapest detour on any later leg (Engine.TrainNow). Nil when
+-- the guide has no route ahead of the player to measure against.
+function Own.trainerOnRoute(list, tier, later)
 	local here = ns.PlayerPoint()
 	local pts = here and Own.routePoints()
 	if not pts or #pts == 0 then return nil end
@@ -7308,38 +7310,70 @@ function Own.trainerOnRoute(list, tier)
 		end
 		return ab and via and via - ab
 	end
-	local best, bestCost
+	local best, bestLeg, bestCost
 	for _, c in ipairs(list) do
 		if tier[c] == tier[list[1]] then
 			local d, leg = Own.routeDetour(here, pts, c, ns.DirectTravelCost)
 			if d then
-				local cost = detour(c, 1)
+				local cost, at = detour(c, 1), 1
 				if leg > 1 then
 					local other = detour(c, leg)
-					if other and (not cost or other < cost) then cost = other end
+					if other and (not cost or other < cost) then cost, at = other, leg end
 				end
-				cost = cost or d
-				if not best or cost < bestCost - Own.ROUTE_TIE then best, bestCost = c, cost end
+				if not cost then cost, at = d, leg end
+				if not best or cost < bestCost - Own.ROUTE_TIE then best, bestLeg, bestCost = c, at, cost end
 			end
 		end
 	end
-	return best
+	if not best then return nil end
+	local afterwards
+	if later then
+		for i = 2, #pts do
+			local d = detour(best, i)
+			if d and (not afterwards or d < afterwards) then afterwards = d end
+		end
+	end
+	return best, bestLeg, bestCost, afterwards
 end
 
 -- The best class trainer for the character from where they stand, or nil;
 -- its npcName in the client's language where Names has it. `onRoute`: the one
--- that costs the least detour on the guide's route instead, when it has one.
-function Engine.NearestClassTrainer(onRoute)
+-- that costs the least detour on the guide's route instead, when it has one,
+-- with its leg, detour and (`later`) cheapest later detour (Own.trainerOnRoute).
+function Engine.NearestClassTrainer(onRoute, later)
 	if #classTrainers.candidates == 0 then return nil end
 	if not player then refreshPlayer() end
 	local p = pickFor(classTrainers)
-	local t = p.list[p.i]
-	if onRoute and t then t = Own.trainerOnRoute(p.list, p.tier) or t end
+	local t, leg, cost, after = p.list[p.i], nil, nil, nil
+	if onRoute and t then
+		local r, l, c, a = Own.trainerOnRoute(p.list, p.tier, later)
+		if r then t, leg, cost, after = r, l, c, a end
+	end
 	if t then
 		t.npcEnglish = t.npcEnglish or t.npcName
 		t.npcName = ns.Names.Npc(t.npc) or t.npcEnglish
 	end
-	return t
+	return t, leg, cost, after
+end
+
+-- The class trainer to go to now, before the live step's work, or nil: when
+-- the way to that work spends the Hearthstone and the trainer on the guide's
+-- way (NearestClassTrainer(true)) costs least before it, by more than
+-- Own.ROUTE_TIE against every later leg: Teleport: Moonglade before a hearth
+-- home, the Hearthstone back. Later legs are priced from where the player
+-- will be, without their teleports, so only a stone about to be spent makes
+-- now the cheap moment. Never while the guide's own stop is near
+-- (TrainingAdvice). A plan per leg: asked at step changes only.
+function Engine.TrainNow()
+	local steps = Engine.GuideTrainStop()
+	if type(steps) == "number" and steps <= Engine.TRAIN_GUIDE_NEAR then return nil end
+	local pts = Own.routePoints()
+	if #pts < 2 then return nil end
+	local with, without = ns.TravelCost(nil, pts[1]), ns.TravelCost(nil, pts[1], true)
+	if not (with and without and with < without) then return nil end
+	local t, leg, cost, later = Engine.NearestClassTrainer(true, true)
+	if t and leg == 1 and cost and later and cost + Own.ROUTE_TIE < later then return t end
+	return nil
 end
 
 -- Whether `npc` is a class trainer of the character's class.

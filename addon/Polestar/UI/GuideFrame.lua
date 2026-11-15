@@ -1935,10 +1935,7 @@ function GF.TakeBanner()
 	elseif kind == "train" then
 		notices.train = nil
 		local advice = E and E.TrainingAdvice and E.TrainingAdvice() or {}
-		local t, nav2 = not advice.guide and (advice.trainer or n.trainer) or nil, ns.Nav
-		if t and t.map and t.x and nav2 and nav2.SetTarget then
-			nav2.StartTrip(nav2.SetTarget(t.map, t.x, t.y, t.npcName or L["Class trainer"], t.f, "trainer", t.z), nil, L["Class trainer"])
-		end
+		GF.TrainTrip(not advice.guide and (advice.trainer or n.trainer) or nil)
 	elseif kind == "riding" then
 		notices.riding = nil
 		local t, nav2 = n.trainer, ns.Nav
@@ -5442,13 +5439,39 @@ ns.On("GUIDE_CONTINUED", function(fromId, toId, carried)
 	end)
 end)
 
+-- The arrow's trip to class trainer `t` (nil: none).
+function GF.TrainTrip(t)
+	local nav = ns.Nav
+	if t and t.map and t.x and nav and nav.SetTarget then
+		nav.StartTrip(nav.SetTarget(t.map, t.x, t.y, t.npcName or L["Class trainer"], t.f, "trainer", t.z), nil, L["Class trainer"])
+	end
+end
+
+-- While the training reminder is up, the arrow goes to the trainer first when
+-- now is the cheap moment (Engine.TrainNow), as the banner's Show would, and
+-- the reminder is done. Asked as it comes and at every step change, after
+-- Nav's own STEP_CHANGED; never over a trip under way.
+function GF.TrainIfNow()
+	local E, nav = ns.Engine, ns.Nav
+	if not (notices.train and E and E.TrainNow and nav and nav.Trip) or nav.Trip() then return end
+	local t = E.TrainNow()
+	if not t then return end
+	notices.train = nil
+	GF.TrainTrip(t)
+	ns.Print(string.format(L["Class training costs least now: the arrow takes you to %s first."], t.npcName or L["Class trainer"]))
+	if ns.IsLoggedIn() then GF.Layout() end
+end
+local function trainSoon() ns.After(0, GF.TrainIfNow) end
+
 -- TRAIN_DUE(level, trainer): new class skills are waiting. A later level's
 -- reminder replaces an older one.
 ns.On("TRAIN_DUE", function(level, trainer)
 	if not F then return end
 	notices.train = { level = level, trainer = type(trainer) == "table" and trainer or nil }
 	if ns.IsLoggedIn() then GF.Layout() end
+	trainSoon()
 end)
+ns.On("STEP_CHANGED", trainSoon)
 
 -- RIDING_DUE(notice): player can learn riding; show the banner until resolved.
 ns.On("RIDING_DUE", function(notice)
